@@ -62,6 +62,7 @@ public class SegmentIDGenImpl implements IDGen {
         // 确保加载到kv后才初始化成功
         updateCacheFromDb();
         initOK = true;
+        // 开启定时任务，每分钟从DB中同步一次数据，保证DB中新增、删除的数据能及时同步到缓存中
         updateCacheFromDbAtEveryMinute();
         return initOK;
     }
@@ -84,6 +85,9 @@ public class SegmentIDGenImpl implements IDGen {
         }, 60, 60, TimeUnit.SECONDS);
     }
 
+    /**
+     * 根据DB中的bizTag，同步本地缓存中的数据，保证缓存中bizTag是全量数据，同时会清理已经下线的bizTag
+     */
     private void updateCacheFromDb() {
         logger.info("update cache from db");
         StopWatch sw = new Slf4JStopWatch();
@@ -92,17 +96,30 @@ public class SegmentIDGenImpl implements IDGen {
             if (dbTags == null || dbTags.isEmpty()) {
                 return;
             }
+            // 当前jvm本地缓存的所有bizTag，系统第一次启动执行时，缓存为空，以后是有值的
             List<String> cacheTags = new ArrayList<String>(cache.keySet());
+            /**
+             * 从DB中查询出的所有bizTag，有三种情况
+             * 1. DB中数据bizTag数量和缓存中数量一致
+             * 2. DB中bizTag多(新接入某些业务的情况)，则需要将缓存中不存在的bizTag初始化对应的号段，并放入缓存
+             * 3. DB中bizTag少(某些业务下线的情况)，则需要将缓存中多余的bizTag清除，节省内存
+             */
             Set<String> insertTagsSet = new HashSet<>(dbTags);
+            // 某些bizTag下线，DB中不存在，需要从缓存中删除的bizTag列表
             Set<String> removeTagsSet = new HashSet<>(cacheTags);
             //db中新加的tags灌进cache
             for(int i = 0; i < cacheTags.size(); i++){
                 String tmp = cacheTags.get(i);
                 if(insertTagsSet.contains(tmp)){
+                    /**
+                     * 遍历缓存中存在的bizTag，如果改bizTag也存在于DB中，说明该bizTag还有效，不用重新初始化
+                     * 将该bizTag从insertTagsSet中删除，最后剩余的bizTag是DB中新增的且缓存中没有的
+                     */
                     insertTagsSet.remove(tmp);
                 }
             }
             for (String tag : insertTagsSet) {
+                // insertTagsSet中的bizTag是缓存中没有的，需要初始化号段，并加入缓存
                 SegmentBuffer buffer = new SegmentBuffer();
                 buffer.setKey(tag);
                 Segment segment = buffer.getCurrent();
@@ -116,10 +133,12 @@ public class SegmentIDGenImpl implements IDGen {
             for(int i = 0; i < dbTags.size(); i++){
                 String tmp = dbTags.get(i);
                 if(removeTagsSet.contains(tmp)){
+                    // 遍历DB中的bizTag，并从集合中删除，最后剩下的就是DB中没有，缓存中存在的，这部分需要清除
                     removeTagsSet.remove(tmp);
                 }
             }
             for (String tag : removeTagsSet) {
+                // 从缓存中清除DB中不存在的bizTag，节省内存
                 cache.remove(tag);
                 logger.info("Remove tag {} from IdCache", tag);
             }
@@ -136,9 +155,12 @@ public class SegmentIDGenImpl implements IDGen {
             return new Result(EXCEPTION_ID_IDCACHE_INIT_FALSE, Status.EXCEPTION);
         }
         if (cache.containsKey(key)) {
+            // 从缓存中获取到对应的号段
             SegmentBuffer buffer = cache.get(key);
             if (!buffer.isInitOk()) {
+                // 如果改号段还没有初始化(从DB中加载出来，只是实例化了对象，并没有对对象做初始化)，则加锁并进行初始化
                 synchronized (buffer) {
+                    // double-check
                     if (!buffer.isInitOk()) {
                         try {
                             updateSegmentFromDb(key, buffer.getCurrent());
@@ -150,6 +172,7 @@ public class SegmentIDGenImpl implements IDGen {
                     }
                 }
             }
+            // 如果号段已经初始化完成，
             return getIdFromSegmentBuffer(cache.get(key));
         }
         return new Result(EXCEPTION_ID_KEY_NOT_EXISTS, Status.EXCEPTION);
@@ -160,18 +183,25 @@ public class SegmentIDGenImpl implements IDGen {
         SegmentBuffer buffer = segment.getBuffer();
         LeafAlloc leafAlloc;
         if (!buffer.isInitOk()) {
+            // 号段没有初始化，则更新数据库中bizTag的最大值，并返回更新后的值
             leafAlloc = dao.updateMaxIdAndGetLeafAlloc(key);
+            // 步长是DB中的步长
             buffer.setStep(leafAlloc.getStep());
+            // 最小步长也是DB中的步长
             buffer.setMinStep(leafAlloc.getStep());//leafAlloc中的step为DB中的step
         } else if (buffer.getUpdateTimestamp() == 0) {
+            // 更新DB中最大值，并设置号段
             leafAlloc = dao.updateMaxIdAndGetLeafAlloc(key);
             buffer.setUpdateTimestamp(System.currentTimeMillis());
             buffer.setStep(leafAlloc.getStep());
             buffer.setMinStep(leafAlloc.getStep());//leafAlloc中的step为DB中的step
         } else {
+            // 如果号段已经初始化完成
             long duration = System.currentTimeMillis() - buffer.getUpdateTimestamp();
+            // 动态调整下一次取号段的步长
             int nextStep = buffer.getStep();
             if (duration < SEGMENT_DURATION) {
+                // 号段使用时间小于15分钟，如果当前步长的2倍大于最大步长，则不调整，否则，则将步长扩大两倍
                 if (nextStep * 2 > MAX_STEP) {
                     //do nothing
                 } else {
@@ -180,13 +210,16 @@ public class SegmentIDGenImpl implements IDGen {
             } else if (duration < SEGMENT_DURATION * 2) {
                 //do nothing with nextStep
             } else {
+                // 如果>=30分钟才耗尽号段，则说明号段过长，进行缩小，缩小一半，但是不能小于最小步长
                 nextStep = nextStep / 2 >= buffer.getMinStep() ? nextStep / 2 : nextStep;
             }
             logger.info("leafKey[{}], step[{}], duration[{}mins], nextStep[{}]", key, buffer.getStep(), String.format("%.2f",((double)duration / (1000 * 60))), nextStep);
             LeafAlloc temp = new LeafAlloc();
             temp.setKey(key);
             temp.setStep(nextStep);
+            // 更新DB中号段
             leafAlloc = dao.updateMaxIdByCustomStepAndGetLeafAlloc(temp);
+            // 更新缓存中号段
             buffer.setUpdateTimestamp(System.currentTimeMillis());
             buffer.setStep(nextStep);
             buffer.setMinStep(leafAlloc.getStep());//leafAlloc的step为DB中的step

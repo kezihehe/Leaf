@@ -26,8 +26,10 @@ public class SegmentService {
 
     public SegmentService() throws SQLException, InitException {
         Properties properties = PropertyFactory.getProperties();
+        // 是否启用了号段模式
         boolean flag = Boolean.parseBoolean(properties.getProperty(Constants.LEAF_SEGMENT_ENABLE, "true"));
         if (flag) {
+            // 如果启用了号段模式，则初始化数据源，用于和DB交互，更新DB中号段值和步长等
             // Config dataSource
             dataSource = new DruidDataSource();
             dataSource.setUrl(properties.getProperty(Constants.LEAF_JDBC_URL));
