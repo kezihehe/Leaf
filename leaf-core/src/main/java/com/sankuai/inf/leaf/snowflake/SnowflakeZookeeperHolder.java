@@ -48,11 +48,13 @@ public class SnowflakeZookeeperHolder {
 
     public boolean init() {
         try {
+            // 创建zk连接
             CuratorFramework curator = createWithOptions(connectionString, new RetryUntilElapsed(1000, 4), 10000, 6000);
             curator.start();
+            // 查询是否存在持久化节点/snowflake/${leaf.name}/forever
             Stat stat = curator.checkExists().forPath(PATH_FOREVER);
             if (stat == null) {
-                //不存在根节点,机器第一次启动,创建/snowflake/ip:port-000000000,并上传数据
+                // 第一次启动，不存在根节点,机器第一次启动,创建/snowflake/ip:port-000000000,并上传数据
                 zk_AddressNode = createNode(curator);
                 //worker id 默认是0
                 updateLocalWorkerID(workerID);
@@ -60,8 +62,9 @@ public class SnowflakeZookeeperHolder {
                 ScheduledUploadData(curator, zk_AddressNode);
                 return true;
             } else {
+                // 非第一次启动
                 Map<String, Integer> nodeMap = Maps.newHashMap();//ip:port->00001
-                Map<String, String> realNode = Maps.newHashMap();//ip:port->(ipport-000001)
+                Map<String, String> realNode = Maps.newHashMap();//ip:port->(ip:port-000001)
                 //存在根节点,先检查是否有属于自己的根节点
                 List<String> keys = curator.getChildren().forPath(PATH_FOREVER);
                 for (String key : keys) {
@@ -69,6 +72,7 @@ public class SnowflakeZookeeperHolder {
                     realNode.put(nodeKey[0], key);
                     nodeMap.put(nodeKey[0], Integer.parseInt(nodeKey[1]));
                 }
+                // 查看是否有自己的节点
                 Integer workerid = nodeMap.get(listenAddress);
                 if (workerid != null) {
                     //有自己的节点,zk_AddressNode=ip:port
@@ -128,6 +132,13 @@ public class SnowflakeZookeeperHolder {
 
     }
 
+    /**
+     * 获取zk节点上存储的时间，和本地时间做比较，本地时间要大于zk上存储的时间
+     * @param curator
+     * @param zk_AddressNode
+     * @return
+     * @throws Exception
+     */
     private boolean checkInitTimeStamp(CuratorFramework curator, String zk_AddressNode) throws Exception {
         byte[] bytes = curator.getData().forPath(zk_AddressNode);
         Endpoint endPoint = deBuildData(new String(bytes));

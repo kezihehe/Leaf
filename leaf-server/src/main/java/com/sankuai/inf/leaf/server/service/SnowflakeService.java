@@ -21,10 +21,13 @@ public class SnowflakeService {
 
     public SnowflakeService() throws InitException {
         Properties properties = PropertyFactory.getProperties();
+        // 是否开启雪花算法模式
         boolean flag = Boolean.parseBoolean(properties.getProperty(Constants.LEAF_SNOWFLAKE_ENABLE, "true"));
         if (flag) {
+            // 从配置文件中获取zk地址和端口
             String zkAddress = properties.getProperty(Constants.LEAF_SNOWFLAKE_ZK_ADDRESS);
             int port = Integer.parseInt(properties.getProperty(Constants.LEAF_SNOWFLAKE_PORT));
+            // 实例化雪花算法实现
             idGen = new SnowflakeIDGenImpl(zkAddress, port);
             if(idGen.init()) {
                 logger.info("Snowflake Service Init Successfully");
